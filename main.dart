@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_selector/file_selector.dart';
@@ -114,27 +115,36 @@ class Home extends StatelessWidget {
   const Home({super.key});
 
   Future<void> openPdf(BuildContext c) async {
-    const group = XTypeGroup(
-        label: 'PDF',
-        extensions: ['pdf'],
-        mimeTypes: ['application/pdf'],
-        uniformTypeIdentifiers: ['com.adobe.pdf']);
-    final f = await openFile(acceptedTypeGroups: [group]);
-    if (f == null) return;
-    final data = await f.readAsBytes();
-    showLoading(c);
+    XFile? f;
     try {
-      final pages = await rasterPdf(data);
-      if (!c.mounted) return;
-      Navigator.pop(c);
-      Navigator.push(c, MaterialPageRoute(
-          builder: (_) => Editor(initial: pages, title: f.name)));
+      f = await openFile();
+    } catch (e) {
+      toast(c, 'File chunne me dikkat: $e');
+      return;
+    }
+    if (f == null) return;
+    final file = f;
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      toast(c, 'Ye PDF file nahi hai, koi .pdf file chuno');
+      return;
+    }
+    showLoading(c);
+    Uint8List? data;
+    try {
+      data = await file.readAsBytes();
     } catch (e) {
       if (c.mounted) {
         Navigator.pop(c);
-        toast(c, 'PDF open nahi ho paayi');
+        toast(c, 'File padh nahi paaye: $e');
       }
+      return;
     }
+    if (!c.mounted) return;
+    Navigator.pop(c);
+    final doc = PdfDoc();
+    doc.start(data!);
+    Navigator.push(c, MaterialPageRoute(
+        builder: (_) => Reader(doc: doc, title: file.name)));
   }
 
   Widget card(IconData icon, String t, String s, VoidCallback f) => InkWell(
@@ -200,8 +210,9 @@ class Home extends StatelessWidget {
                 }),
                 const SizedBox(height: 16),
                 card(Icons.folder_open_rounded, 'Open PDF',
-                    'PDF kholo aur usme aur pages jodo', () => openPdf(context)),
-                const SizedBox(height: 24),
+                    'Kisi bhi PDF ko kitab ki tarah padho', () => openPdf(context)),
+                const SizedBox(height: 28),
+                const Center(child: Founder(color: Colors.white70)),
               ]),
             ),
           ),
@@ -343,7 +354,8 @@ class _EditorState extends State<Editor> {
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-          child: Row(children: [
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
             Expanded(
               child: OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
@@ -365,6 +377,8 @@ class _EditorState extends State<Editor> {
                 label: const Text('Submit'),
               ),
             ),
+          ]),
+            const Founder(),
           ]),
         ),
       ),
@@ -556,5 +570,219 @@ class _TypePageState extends State<TypePage> {
             ),
           ),
         ]),
+      );
+}
+
+// ---------- Founder footer ----------
+class Founder extends StatelessWidget {
+  final Color color;
+  const Founder({super.key, this.color = Colors.black45});
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Text('Founder :- Nawal Gurj4r',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: color, fontSize: 12, letterSpacing: .6)),
+      );
+}
+
+// ---------- PDF loader (page by page) ----------
+class PdfDoc extends ChangeNotifier {
+  final pages = <Uint8List>[];
+  bool done = false;
+  String? error;
+
+  Future<void> start(Uint8List bytes) async {
+    try {
+      await for (final r in Printing.raster(bytes, dpi: 140)) {
+        pages.add(await r.toPng());
+        notifyListeners();
+      }
+    } catch (e) {
+      error = '$e';
+    }
+    done = true;
+    notifyListeners();
+  }
+}
+
+// ---------- Reader with book page flip ----------
+class Reader extends StatefulWidget {
+  final PdfDoc doc;
+  final String title;
+  const Reader({super.key, required this.doc, required this.title});
+  @override
+  State<Reader> createState() => _ReaderState();
+}
+
+class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
+  late final AnimationController ctrl = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 380));
+  int idx = 0;
+  int dir = 0; // 1 = aage, -1 = peeche
+  bool busy = false;
+  PdfDoc get doc => widget.doc;
+
+  @override
+  void dispose() {
+    ctrl.dispose();
+    super.dispose();
+  }
+
+  void onUpdate(DragUpdateDetails d, double w) {
+    if (busy) return;
+    final dx = d.delta.dx;
+    if (dir == 0) {
+      if (dx < 0 && idx < doc.pages.length - 1) {
+        dir = 1;
+      } else if (dx > 0 && idx > 0) {
+        dir = -1;
+      } else {
+        return;
+      }
+      ctrl.value = 0;
+    }
+    final change = (dir == 1 ? -dx : dx) / w;
+    ctrl.value = (ctrl.value + change).clamp(0.0, 1.0).toDouble();
+    setState(() {});
+  }
+
+  void onEnd(DragEndDetails d) {
+    if (busy || dir == 0) return;
+    final v = d.primaryVelocity ?? 0;
+    final go = ctrl.value > .5 || (dir == 1 ? v < -600 : v > 600);
+    finish(go);
+  }
+
+  Future<void> finish(bool go) async {
+    busy = true;
+    await ctrl.animateTo(go ? 1.0 : 0.0);
+    if (!mounted) return;
+    setState(() {
+      if (go) idx += dir;
+      dir = 0;
+      ctrl.value = 0;
+      busy = false;
+    });
+  }
+
+  Future<void> turn(int d) async {
+    if (busy || dir != 0) return;
+    if (d == 1 && idx >= doc.pages.length - 1) return;
+    if (d == -1 && idx <= 0) return;
+    setState(() {
+      dir = d;
+      ctrl.value = 0;
+    });
+    await finish(true);
+  }
+
+  Widget flat(int i) => Container(
+        color: Colors.white,
+        child: Image.memory(doc.pages[i], fit: BoxFit.contain, gaplessPlayback: true),
+      );
+
+  Widget shaded(Widget c, double a) => Stack(fit: StackFit.expand, children: [
+        c,
+        IgnorePointer(
+            child: ColoredBox(
+                color: Colors.black.withValues(alpha: a.clamp(0.0, 1.0).toDouble()))),
+      ]);
+
+  Widget flipped(Widget c, double angle, double shade) => Transform(
+        alignment: Alignment.centerLeft,
+        transform: Matrix4.identity()
+          ..setEntry(3, 2, 0.0012)
+          ..rotateY(angle),
+        child: shaded(c, shade),
+      );
+
+  Widget book() {
+    final p = ctrl.value;
+    const maxA = math.pi / 2 * 0.98;
+    if (dir == 1 && idx + 1 < doc.pages.length) {
+      return Stack(fit: StackFit.expand, children: [
+        shaded(flat(idx + 1), (1 - p) * .35),
+        flipped(flat(idx), p * maxA, p * .45),
+      ]);
+    }
+    if (dir == -1 && idx - 1 >= 0) {
+      return Stack(fit: StackFit.expand, children: [
+        shaded(flat(idx), p * .35),
+        flipped(flat(idx - 1), (1 - p) * maxA, (1 - p) * .45),
+      ]);
+    }
+    return flat(idx);
+  }
+
+  void edit() {
+    if (!doc.done) {
+      toast(context, 'PDF abhi load ho rahi hai, thoda ruko');
+      return;
+    }
+    Navigator.push(context, MaterialPageRoute(
+        builder: (_) => Editor(initial: List.of(doc.pages), title: widget.title)));
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: const Color(0xFF14102B),
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          foregroundColor: Colors.white,
+          title: Text(widget.title, overflow: TextOverflow.ellipsis),
+          actions: [
+            IconButton(
+                tooltip: 'Pages jodo / Save',
+                icon: const Icon(Icons.edit_note_rounded),
+                onPressed: edit),
+          ],
+        ),
+        body: AnimatedBuilder(
+          animation: Listenable.merge([ctrl, doc]),
+          builder: (context, _) {
+            if (doc.pages.isEmpty) {
+              return Center(
+                child: doc.error != null
+                    ? Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text('PDF open nahi hui:\n${doc.error}',
+                            style: const TextStyle(color: Colors.white)))
+                    : doc.done
+                        ? const Text('PDF me koi page nahi mila',
+                            style: TextStyle(color: Colors.white))
+                        : const CircularProgressIndicator(),
+              );
+            }
+            final n = doc.pages.length;
+            return Column(children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, box) => GestureDetector(
+                    onHorizontalDragUpdate: (d) => onUpdate(d, box.maxWidth),
+                    onHorizontalDragEnd: onEnd,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                      child: ClipRect(child: book()),
+                    ),
+                  ),
+                ),
+              ),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                IconButton(
+                    color: Colors.white,
+                    onPressed: () => turn(-1),
+                    icon: const Icon(Icons.chevron_left_rounded, size: 32)),
+                Text('${idx + 1} / $n${doc.done ? '' : '+'}',
+                    style: const TextStyle(color: Colors.white, fontSize: 15)),
+                IconButton(
+                    color: Colors.white,
+                    onPressed: () => turn(1),
+                    icon: const Icon(Icons.chevron_right_rounded, size: 32)),
+              ]),
+              const SafeArea(top: false, child: Founder(color: Colors.white54)),
+            ]);
+          },
+        ),
       );
 }
