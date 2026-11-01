@@ -15,8 +15,11 @@ jobs:
       - run: flutter create --project-name pdf_studio --platforms android .
       - run: cp main.dart lib/main.dart
       - run: flutter pub add pdf printing image_picker file_selector google_fonts
+      - run: sed -i 's/android:label="[^"]*"/android:label="Zod PDF"/' android/app/src/main/AndroidManifest.xml
+      - run: pip install pillow
+      - run: python3 make_icons.py
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
-          name: pdf-studio-apk
+          name: zod-pdf-apk
           path: build/app/outputs/flutter-apk/app-release.apk
