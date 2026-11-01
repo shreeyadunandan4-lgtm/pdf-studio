@@ -23,7 +23,6 @@ class PdfStudio extends StatelessWidget {
         theme: ThemeData(
           useMaterial3: true,
           colorSchemeSeed: kPurple,
-          textTheme: GoogleFonts.poppinsTextTheme(),
         ),
         home: const Home(),
       );
