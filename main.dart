@@ -148,7 +148,9 @@ class Home extends StatelessWidget {
         builder: (_) => Reader(doc: doc, title: file.name)));
   }
 
-  Widget card(IconData icon, String t, String s, VoidCallback f) => InkWell(
+  Widget card(IconData icon, String t, String s, VoidCallback f) => Appear(
+      delay: t == 'Create PDF' ? 500 : 700,
+      child: InkWell(
         borderRadius: BorderRadius.circular(28),
         onTap: f,
         child: Container(
@@ -178,7 +180,7 @@ class Home extends StatelessWidget {
             const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
           ]),
         ),
-      );
+      ));
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -195,14 +197,18 @@ class Home extends StatelessWidget {
               padding: const EdgeInsets.all(24),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Spacer(),
-                const Icon(Icons.picture_as_pdf_rounded, color: Colors.white, size: 56),
+                const AnimatedLogo(),
                 const SizedBox(height: 16),
-                const Text('Zod PDF',
-                    style: TextStyle(
-                        color: Colors.white, fontSize: 36, fontWeight: FontWeight.w700)),
+                const Appear(
+                    delay: 150,
+                    child: Text('Zod PDF',
+                        style: TextStyle(
+                            color: Colors.white, fontSize: 36, fontWeight: FontWeight.w700))),
                 const SizedBox(height: 6),
-                const Text('Banao, dekho aur badhao — bilkul offline.',
-                    style: TextStyle(color: Colors.white70, fontSize: 15)),
+                const Appear(
+                    delay: 300,
+                    child: Text('Banao, dekho aur badhao — bilkul offline.',
+                        style: TextStyle(color: Colors.white70, fontSize: 15))),
                 const Spacer(),
                 card(Icons.add_circle_outline, 'Create PDF',
                     'Photo ya type karke naya PDF banao', () {
@@ -671,9 +677,11 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
   void turnUpdate(double dx, double w) {
     if (busy) return;
     if (dir == 0) {
-      if (dx < 0 && idx < doc.pages.length - 1) {
+      if (dx < 0 && idx < doc.pages.length - 1 &&
+          imgs[idx] != null && imgs[idx + 1] != null) {
         dir = 1;
-      } else if (dx > 0 && idx > 0) {
+      } else if (dx > 0 && idx > 0 &&
+          imgs[idx - 1] != null && imgs[idx] != null) {
         dir = -1;
       } else {
         return;
@@ -775,6 +783,8 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
     if (zoom > 1.01) setState(resetZoom);
     if (d == 1 && idx >= doc.pages.length - 1) return;
     if (d == -1 && idx <= 0) return;
+    if (imgs[d == 1 ? idx : idx - 1] == null ||
+        imgs[d == 1 ? idx + 1 : idx] == null) return;
     setState(() {
       dir = d;
       ctrl.value = 0;
@@ -782,10 +792,13 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
     await finish(true);
   }
 
-  Widget flat(int i) => Container(
-        color: Colors.white,
-        child: Image.memory(doc.pages[i], fit: BoxFit.contain, gaplessPlayback: true),
-      );
+  Widget flat(int i) {
+    final im = imgs[i];
+    return Container(
+      color: Colors.white,
+      child: im == null ? null : RawImage(image: im, fit: BoxFit.contain),
+    );
+  }
 
   Widget book() {
     if (dir == 0) return flat(idx);
@@ -974,4 +987,99 @@ class CurlPainter extends CustomPainter {
   @override
   bool shouldRepaint(CurlPainter o) =>
       o.t != t || o.top != top || o.under != under || o.bottom != bottom;
+}
+
+// ---------- Home animations ----------
+class Appear extends StatelessWidget {
+  final int delay;
+  final Widget child;
+  const Appear({super.key, required this.delay, required this.child});
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 1400),
+        curve: Interval(delay / 1400.0, 1.0, curve: Curves.easeOutCubic),
+        builder: (_, v, c) => Opacity(
+          opacity: v.clamp(0.0, 1.0).toDouble(),
+          child: Transform.translate(offset: Offset(0, 36 * (1 - v)), child: c),
+        ),
+        child: child,
+      );
+}
+
+class AnimatedLogo extends StatefulWidget {
+  const AnimatedLogo({super.key});
+  @override
+  State<AnimatedLogo> createState() => _AnimatedLogoState();
+}
+
+class _AnimatedLogoState extends State<AnimatedLogo>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 2200))
+    ..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+        animation: c,
+        builder: (context, _) {
+          final v = Curves.easeInOut.transform(c.value);
+          return SizedBox(
+            width: 120,
+            height: 120,
+            child: Stack(alignment: Alignment.center, children: [
+              Container(
+                width: 92 + 10 * v,
+                height: 92 + 10 * v,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withValues(alpha: .10),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.white.withValues(alpha: .12 + .18 * v),
+                        blurRadius: 24 + 22 * v)
+                  ],
+                ),
+              ),
+              Transform.translate(
+                offset: Offset(0, -8 * v),
+                child: const Icon(Icons.picture_as_pdf_rounded,
+                    color: Colors.white, size: 58),
+              ),
+              Positioned(
+                top: 6 - 4 * v,
+                left: 22,
+                child: Transform.rotate(
+                  angle: -0.35 + 0.2 * v,
+                  child: const Text('👑', style: TextStyle(fontSize: 26)),
+                ),
+              ),
+              Positioned(
+                top: 14,
+                right: 12,
+                child: Opacity(
+                  opacity: v,
+                  child: const Icon(Icons.auto_awesome,
+                      color: Color(0xFFFFE08A), size: 20),
+                ),
+              ),
+              Positioned(
+                bottom: 14,
+                left: 10,
+                child: Opacity(
+                  opacity: 1 - v,
+                  child: const Icon(Icons.auto_awesome,
+                      color: Color(0xFFFFE08A), size: 15),
+                ),
+              ),
+            ]),
+          );
+        },
+      );
 }
