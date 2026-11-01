@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -19,7 +20,7 @@ class PdfStudio extends StatelessWidget {
   const PdfStudio({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'PDF Studio',
+        title: 'Zod PDF',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
@@ -196,7 +197,7 @@ class Home extends StatelessWidget {
                 const Spacer(),
                 const Icon(Icons.picture_as_pdf_rounded, color: Colors.white, size: 56),
                 const SizedBox(height: 16),
-                const Text('PDF Studio',
+                const Text('Zod PDF',
                     style: TextStyle(
                         color: Colors.white, fontSize: 36, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
@@ -594,7 +595,7 @@ class PdfDoc extends ChangeNotifier {
 
   Future<void> start(Uint8List bytes) async {
     try {
-      await for (final r in Printing.raster(bytes, dpi: 140)) {
+      await for (final r in Printing.raster(bytes, dpi: 160)) {
         pages.add(await r.toPng());
         notifyListeners();
       }
@@ -621,17 +622,54 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
   int idx = 0;
   int dir = 0; // 1 = aage, -1 = peeche
   bool busy = false;
+  bool cornerBottom = true;
+  final imgs = <int, ui.Image>{};
+  final loading = <int>{};
   PdfDoc get doc => widget.doc;
 
   @override
+  void initState() {
+    super.initState();
+    doc.addListener(prefetch);
+    prefetch();
+  }
+
+  Future<ui.Image> decodeImg(Uint8List b) {
+    final c = Completer<ui.Image>();
+    ui.decodeImageFromList(b, c.complete);
+    return c.future;
+  }
+
+  Future<void> ensure(int i) async {
+    if (i < 0 || i >= doc.pages.length) return;
+    if (imgs.containsKey(i) || loading.contains(i)) return;
+    loading.add(i);
+    try {
+      imgs[i] = await decodeImg(doc.pages[i]);
+    } catch (_) {}
+    loading.remove(i);
+    if (mounted) setState(() {});
+  }
+
+  void prefetch() {
+    for (final i in [idx - 1, idx, idx + 1]) {
+      ensure(i);
+    }
+    final old = imgs.keys.where((k) => (k - idx).abs() > 2).toList();
+    for (final k in old) {
+      imgs.remove(k)?.dispose();
+    }
+  }
+
+  @override
   void dispose() {
+    doc.removeListener(prefetch);
     ctrl.dispose();
     super.dispose();
   }
 
-  void onUpdate(DragUpdateDetails d, double w) {
+  void turnUpdate(double dx, double w) {
     if (busy) return;
-    final dx = d.delta.dx;
     if (dir == 0) {
       if (dx < 0 && idx < doc.pages.length - 1) {
         dir = 1;
@@ -647,16 +685,81 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
     setState(() {});
   }
 
-  void onEnd(DragEndDetails d) {
+  void turnEnd(double v) {
     if (busy || dir == 0) return;
-    final v = d.primaryVelocity ?? 0;
     final go = ctrl.value > .5 || (dir == 1 ? v < -600 : v > 600);
     finish(go);
   }
 
+  // ---- zoom (2 ungli) ----
+  double zoom = 1, baseZoom = 1;
+  Offset pan = Offset.zero, basePan = Offset.zero, startFocal = Offset.zero;
+  Size boxSize = Size.zero;
+  bool pinching = false;
+
+  void clampPan() {
+    final mx = (zoom - 1) * boxSize.width / 2;
+    final my = (zoom - 1) * boxSize.height / 2;
+    pan = Offset(pan.dx.clamp(-mx, mx).toDouble(), pan.dy.clamp(-my, my).toDouble());
+  }
+
+  void resetZoom() {
+    zoom = 1;
+    pan = Offset.zero;
+  }
+
+  void scaleStart(ScaleStartDetails d) {
+    baseZoom = zoom;
+    basePan = pan;
+    startFocal = d.localFocalPoint;
+    pinching = false;
+    cornerBottom = d.localFocalPoint.dy > boxSize.height / 2;
+  }
+
+  void scaleUpdate(ScaleUpdateDetails d) {
+    if (d.pointerCount >= 2 && dir == 0 && !busy) {
+      pinching = true;
+      setState(() {
+        zoom = (baseZoom * d.scale).clamp(1.0, 4.0).toDouble();
+        pan = basePan + (d.localFocalPoint - startFocal);
+        if (zoom <= 1.01) {
+          resetZoom();
+        } else {
+          clampPan();
+        }
+      });
+      return;
+    }
+    if (zoom > 1.01) {
+      setState(() {
+        pan += d.focalPointDelta;
+        clampPan();
+      });
+      return;
+    }
+    if (pinching) return;
+    turnUpdate(d.focalPointDelta.dx, boxSize.width);
+  }
+
+  void scaleEnd(ScaleEndDetails d) {
+    turnEnd(d.velocity.pixelsPerSecond.dx);
+  }
+
+  void doubleTap() {
+    if (busy || dir != 0) return;
+    setState(() {
+      if (zoom > 1.01) {
+        resetZoom();
+      } else {
+        zoom = 2.2;
+        clampPan();
+      }
+    });
+  }
+
   Future<void> finish(bool go) async {
     busy = true;
-    await ctrl.animateTo(go ? 1.0 : 0.0);
+    await ctrl.animateTo(go ? 1.0 : 0.0, curve: Curves.easeOutCubic);
     if (!mounted) return;
     setState(() {
       if (go) idx += dir;
@@ -664,10 +767,12 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
       ctrl.value = 0;
       busy = false;
     });
+    prefetch();
   }
 
   Future<void> turn(int d) async {
     if (busy || dir != 0) return;
+    if (zoom > 1.01) setState(resetZoom);
     if (d == 1 && idx >= doc.pages.length - 1) return;
     if (d == -1 && idx <= 0) return;
     setState(() {
@@ -682,37 +787,19 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
         child: Image.memory(doc.pages[i], fit: BoxFit.contain, gaplessPlayback: true),
       );
 
-  Widget shaded(Widget c, double a) => Stack(fit: StackFit.expand, children: [
-        c,
-        IgnorePointer(
-            child: ColoredBox(
-                color: Colors.black.withValues(alpha: a.clamp(0.0, 1.0).toDouble()))),
-      ]);
-
-  Widget flipped(Widget c, double angle, double shade) => Transform(
-        alignment: Alignment.centerLeft,
-        transform: Matrix4.identity()
-          ..setEntry(3, 2, 0.0012)
-          ..rotateY(angle),
-        child: shaded(c, shade),
-      );
-
   Widget book() {
+    if (dir == 0) return flat(idx);
+    final topI = dir == 1 ? idx : idx - 1;
+    final underI = dir == 1 ? idx + 1 : idx;
+    if (topI < 0 || underI >= doc.pages.length) return flat(idx);
+    final ti = imgs[topI];
+    final ui2 = imgs[underI];
+    if (ti == null || ui2 == null) return flat(idx);
     final p = ctrl.value;
-    const maxA = math.pi / 2 * 0.98;
-    if (dir == 1 && idx + 1 < doc.pages.length) {
-      return Stack(fit: StackFit.expand, children: [
-        shaded(flat(idx + 1), (1 - p) * .35),
-        flipped(flat(idx), p * maxA, p * .45),
-      ]);
-    }
-    if (dir == -1 && idx - 1 >= 0) {
-      return Stack(fit: StackFit.expand, children: [
-        shaded(flat(idx), p * .35),
-        flipped(flat(idx - 1), (1 - p) * maxA, (1 - p) * .45),
-      ]);
-    }
-    return flat(idx);
+    return CustomPaint(
+      size: Size.infinite,
+      painter: CurlPainter(ti, ui2, dir == 1 ? p : 1 - p, cornerBottom),
+    );
   }
 
   void edit() {
@@ -758,14 +845,27 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
             return Column(children: [
               Expanded(
                 child: LayoutBuilder(
-                  builder: (context, box) => GestureDetector(
-                    onHorizontalDragUpdate: (d) => onUpdate(d, box.maxWidth),
-                    onHorizontalDragEnd: onEnd,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-                      child: ClipRect(child: book()),
-                    ),
-                  ),
+                  builder: (context, box) {
+                    boxSize = Size(box.maxWidth, box.maxHeight);
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onScaleStart: scaleStart,
+                      onScaleUpdate: scaleUpdate,
+                      onScaleEnd: scaleEnd,
+                      onDoubleTap: doubleTap,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                        child: ClipRect(
+                          child: Transform(
+                            alignment: Alignment.center,
+                            transform: Matrix4.translationValues(pan.dx, pan.dy, 0)
+                              ..scale(zoom, zoom, 1.0),
+                            child: book(),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -785,4 +885,93 @@ class _ReaderState extends State<Reader> with SingleTickerProviderStateMixin {
           },
         ),
       );
+}
+
+// ---------- Page curl painter ----------
+class CurlPainter extends CustomPainter {
+  final ui.Image top;
+  final ui.Image under;
+  final double t; // 0 = page seedha, 1 = page palat chuka
+  final bool bottom;
+  CurlPainter(this.top, this.under, this.t, this.bottom);
+
+  void page(Canvas c, Rect r, ui.Image img) {
+    c.drawRect(r, Paint()..color = Colors.white);
+    paintImage(canvas: c, rect: r, image: img, fit: BoxFit.contain);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = Offset.zero & size;
+    final w = size.width, h = size.height;
+    if (t <= 0.003) {
+      page(canvas, r, top);
+      return;
+    }
+    if (t >= 0.997) {
+      page(canvas, r, under);
+      return;
+    }
+    page(canvas, r, under);
+
+    final cy = bottom ? h : 0.0;
+    final c0 = Offset(w, cy);
+    final f = Offset(w - 2 * w * t,
+        cy + (bottom ? -1 : 1) * 0.28 * h * math.sin(math.pi * t));
+    final m = (c0 + f) / 2;
+    var n = c0 - f;
+    n = n / n.distance;
+    final d = Offset(-n.dy, n.dx);
+    final big = 3 * (w + h);
+
+    final flatSide = Path()
+      ..moveTo(m.dx + d.dx * big, m.dy + d.dy * big)
+      ..lineTo(m.dx - d.dx * big, m.dy - d.dy * big)
+      ..lineTo(m.dx - d.dx * big - n.dx * big, m.dy - d.dy * big - n.dy * big)
+      ..lineTo(m.dx + d.dx * big - n.dx * big, m.dy + d.dy * big - n.dy * big)
+      ..close();
+    final huge = Rect.fromCenter(center: m, width: big * 2, height: big * 2);
+
+    // reflection matrix about the fold line
+    final a = 1 - 2 * n.dx * n.dx;
+    final b = -2 * n.dx * n.dy;
+    final dd = 1 - 2 * n.dy * n.dy;
+    final k = 2 * (m.dx * n.dx + m.dy * n.dy);
+    final mat = Matrix4(a, b, 0, 0, b, dd, 0, 0, 0, 0, 1, 0, k * n.dx, k * n.dy, 0, 1);
+    final flapShape = (Path()..addRect(r)).transform(mat.storage);
+
+    // 1) seedha reh gaya hissa
+    canvas.save();
+    canvas.clipRect(r);
+    canvas.clipPath(flatSide);
+    page(canvas, r, top);
+    canvas.drawRect(
+        huge,
+        Paint()
+          ..shader = ui.Gradient.linear(m, m - n * 30,
+              [Colors.black.withValues(alpha: .30), Colors.transparent]));
+    canvas.drawShadow(flapShape, Colors.black, 6, true);
+    canvas.restore();
+
+    // 2) mudaa hua hissa (page ka peeche wala side)
+    canvas.save();
+    canvas.clipRect(r);
+    canvas.clipPath(flatSide);
+    canvas.clipPath(flapShape);
+    canvas.save();
+    canvas.transform(mat.storage);
+    page(canvas, r, top);
+    canvas.restore();
+    canvas.drawRect(huge, Paint()..color = Colors.white.withValues(alpha: .30));
+    canvas.drawRect(
+        huge,
+        Paint()
+          ..shader = ui.Gradient.linear(m, m - n * 40,
+              [Colors.black.withValues(alpha: .38), Colors.transparent]));
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(CurlPainter o) =>
+      o.t != t || o.top != top || o.under != under || o.bottom != bottom;
 }
