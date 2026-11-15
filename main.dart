@@ -245,17 +245,15 @@ class _EditorState extends State<Editor> {
     if (f == null) return;
     final b = await f.readAsBytes();
     if (!mounted) return;
-    final r = await Navigator.push<Uint8List>(context,
-        MaterialPageRoute(builder: (_) => ImageEditPage(bytes: b, title: 'Photo edit')));
-    if (r != null && mounted) setState(() => pages.add(r));
+    final out = await Navigator.push<Uint8List>(
+        context, MaterialPageRoute(builder: (_) => PageEditor(bytes: b)));
+    if (out != null) setState(() => pages.add(out));
   }
 
   Future<void> editPage(int i) async {
-    final r = await Navigator.push<Uint8List>(
-        context,
-        MaterialPageRoute(
-            builder: (_) => ImageEditPage(bytes: pages[i], title: 'Page ${i + 1} edit')));
-    if (r != null && mounted) setState(() => pages[i] = r);
+    final out = await Navigator.push<Uint8List>(
+        context, MaterialPageRoute(builder: (_) => PageEditor(bytes: pages[i])));
+    if (out != null) setState(() => pages[i] = out);
   }
 
   Future<void> addType() async {
@@ -358,9 +356,8 @@ class _EditorState extends State<Editor> {
                       Positioned(
                         right: 4,
                         bottom: 4,
-                        child: IconButton.filled(
+                        child: IconButton.filledTonal(
                           iconSize: 18,
-                          tooltip: 'Edit',
                           onPressed: () => editPage(i),
                           icon: const Icon(Icons.edit_rounded),
                         ),
@@ -1105,651 +1102,508 @@ class _AnimatedLogoState extends State<AnimatedLogo>
       );
 }
 
-
-// ---------- Image edit page (crop / draw / text) ----------
-const kInk = <Color>[
-  Colors.black, Colors.white, Colors.red, Colors.pink, Colors.purple,
-  Colors.indigo, Colors.blue, Colors.teal, Colors.green,
-  Color(0xFFFFD600), Colors.orange, Colors.brown,
+// ---------- Photo / page editor (crop, draw, text) ----------
+const kColors = <Color>[
+  Colors.black, Colors.white, Colors.red, Colors.pink, Colors.orange,
+  Color(0xFFFFC107), Colors.green, Colors.teal, Colors.blue, Colors.indigo,
+  Colors.purple, Colors.brown,
 ];
 
-const kFonts = [
-  'Poppins', 'Playfair Display', 'Caveat', 'Lobster',
-  'Pacifico', 'Roboto Mono', 'Noto Sans Devanagari',
-];
-
-enum _EM { crop, draw, text }
-
-enum _CH { none, tl, tr, bl, br, le, ri, to, bo, move }
-
-class _Stroke {
-  final List<Offset> pts; // 0..1 (image ke hisaab se)
+class Stroke {
   final Color color;
-  final double width; // canvas width ka hissa
-  _Stroke(this.pts, this.color, this.width);
+  final double w;
+  final List<Offset> pts = [];
+  Stroke(this.color, this.w);
 }
 
-class _TextItem {
+class TextItem {
   String text;
-  Offset pos; // top-left, 0..1
   Color color;
-  double size; // canvas width ka hissa
+  double size;
   String font;
-  _TextItem(this.text, this.pos, this.color, this.size, this.font);
+  Offset pos;
+  TextItem(this.text, this.color, this.size, this.font, this.pos);
 }
 
-class _StrokePainter extends CustomPainter {
-  final List<_Stroke> strokes;
-  _StrokePainter(this.strokes);
-
+class StrokePainter extends CustomPainter {
+  final List<Stroke> strokes;
+  StrokePainter(this.strokes);
   @override
-  void paint(Canvas canvas, Size s) {
-    for (final st in strokes) {
-      Offset pt(int i) => Offset(st.pts[i].dx * s.width, st.pts[i].dy * s.height);
-      final w = st.width * s.width;
-      if (st.pts.length == 1) {
-        canvas.drawCircle(pt(0), w / 2, Paint()..color = st.color);
+  void paint(Canvas canvas, Size size) {
+    for (final s in strokes) {
+      final p = Paint()
+        ..color = s.color
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = s.w * size.width;
+      Offset o(Offset q) => Offset(q.dx * size.width, q.dy * size.height);
+      if (s.pts.length == 1) {
+        canvas.drawCircle(o(s.pts[0]), s.w * size.width / 2, Paint()..color = s.color);
         continue;
       }
-      final path = Path()..moveTo(pt(0).dx, pt(0).dy);
-      for (var i = 1; i < st.pts.length - 1; i++) {
-        final a = pt(i), b = pt(i + 1);
-        path.quadraticBezierTo(a.dx, a.dy, (a.dx + b.dx) / 2, (a.dy + b.dy) / 2);
+      final path = Path()..moveTo(o(s.pts[0]).dx, o(s.pts[0]).dy);
+      for (final q in s.pts.skip(1)) {
+        path.lineTo(o(q).dx, o(q).dy);
       }
-      final last = pt(st.pts.length - 1);
-      path.lineTo(last.dx, last.dy);
-      canvas.drawPath(
-          path,
-          Paint()
-            ..color = st.color
-            ..style = PaintingStyle.stroke
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round
-            ..strokeWidth = w);
+      canvas.drawPath(path, p);
     }
   }
 
   @override
-  bool shouldRepaint(covariant _StrokePainter old) => true;
+  bool shouldRepaint(StrokePainter o) => true;
 }
 
-class _CropPainter extends CustomPainter {
-  final Rect c; // 0..1
-  _CropPainter(this.c);
-
+class CropPainter extends CustomPainter {
+  final Rect cr;
+  CropPainter(this.cr);
   @override
-  void paint(Canvas canvas, Size s) {
-    final r = Rect.fromLTRB(
-        c.left * s.width, c.top * s.height, c.right * s.width, c.bottom * s.height);
-    final dim = Path()
-      ..addRect(Offset.zero & s)
-      ..addRect(r)
-      ..fillType = PathFillType.evenOdd;
-    canvas.drawPath(dim, Paint()..color = Colors.black54);
+  void paint(Canvas canvas, Size size) {
+    final r = Rect.fromLTRB(cr.left * size.width, cr.top * size.height,
+        cr.right * size.width, cr.bottom * size.height);
+    final dim = Path.combine(PathOperation.difference,
+        Path()..addRect(Offset.zero & size), Path()..addRect(r));
+    canvas.drawPath(dim, Paint()..color = Colors.black.withValues(alpha: .55));
     canvas.drawRect(
         r,
         Paint()
           ..color = Colors.white
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5);
-    final thin = Paint()
-      ..color = Colors.white54
-      ..strokeWidth = .8;
+          ..strokeWidth = 2);
+    final g = Paint()
+      ..color = Colors.white.withValues(alpha: .35)
+      ..strokeWidth = 1;
     for (var i = 1; i < 3; i++) {
-      final x = r.left + r.width * i / 3, y = r.top + r.height * i / 3;
-      canvas.drawLine(Offset(x, r.top), Offset(x, r.bottom), thin);
-      canvas.drawLine(Offset(r.left, y), Offset(r.right, y), thin);
+      final x = r.left + r.width * i / 3;
+      final y = r.top + r.height * i / 3;
+      canvas.drawLine(Offset(x, r.top), Offset(x, r.bottom), g);
+      canvas.drawLine(Offset(r.left, y), Offset(r.right, y), g);
     }
-    final pts = <Offset>[
-      r.topLeft, r.topRight, r.bottomLeft, r.bottomRight,
-      r.centerLeft, r.centerRight, r.topCenter, r.bottomCenter,
-    ];
-    for (final o in pts) {
-      canvas.drawCircle(o, 9, Paint()..color = Colors.white);
-      canvas.drawCircle(o, 6, Paint()..color = kPurple);
+    final hp = Paint()..color = Colors.white;
+    for (final o in [r.topLeft, r.topRight, r.bottomLeft, r.bottomRight]) {
+      canvas.drawCircle(o, 9, hp);
+    }
+    for (final o in [r.topCenter, r.bottomCenter, r.centerLeft, r.centerRight]) {
+      canvas.drawCircle(o, 6, hp);
     }
   }
 
   @override
-  bool shouldRepaint(covariant _CropPainter old) => old.c != c;
+  bool shouldRepaint(CropPainter o) => o.cr != cr;
 }
 
-class ImageEditPage extends StatefulWidget {
+class PageEditor extends StatefulWidget {
   final Uint8List bytes;
-  final String title;
-  const ImageEditPage({super.key, required this.bytes, required this.title});
+  const PageEditor({super.key, required this.bytes});
   @override
-  State<ImageEditPage> createState() => _ImageEditPageState();
+  State<PageEditor> createState() => _PageEditorState();
 }
 
-class _ImageEditPageState extends State<ImageEditPage> {
-  static const _full = Rect.fromLTWH(0, 0, 1, 1);
-
-  late Uint8List bytes, original;
-  Size? imgSize;
-  Rect crop = _full;
-  _EM mode = _EM.crop;
-  _CH _ch = _CH.none;
-  final strokes = <_Stroke>[];
-  final texts = <_TextItem>[];
-  _TextItem? sel;
-  Color drawColor = Colors.red;
-  double drawW = .01;
-  Color textColor = Colors.black;
-  double textSize = .06;
-  String textFont = 'Poppins';
-  bool exporting = false, busy = false;
-  final boundaryKey = GlobalKey();
-
-  bool get fullCrop =>
-      crop.left < .001 && crop.top < .001 && crop.right > .999 && crop.bottom > .999;
-
-  bool get dirty =>
-      !identical(bytes, original) || strokes.isNotEmpty || texts.isNotEmpty;
+class _PageEditorState extends State<PageEditor> {
+  static const full = Rect.fromLTRB(0, 0, 1, 1);
+  final key = GlobalKey();
+  ui.Image? base;
+  int mode = 0; // 0 crop, 1 draw, 2 text
+  final strokes = <Stroke>[];
+  final texts = <TextItem>[];
+  Color penColor = Colors.red;
+  double penW = 0.008;
+  Rect cr = full;
+  int grab = 0;
+  Size area = Size.zero;
+  bool busy = false;
 
   @override
   void initState() {
     super.initState();
-    bytes = widget.bytes;
-    original = widget.bytes;
-    _load();
+    load(widget.bytes);
   }
 
-  Future<void> _load() async {
-    try {
-      final im = await decodeImageFromList(bytes);
-      if (!mounted) return;
-      setState(() {
-        imgSize = Size(im.width.toDouble(), im.height.toDouble());
-        crop = _full;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      toast(context, 'Image khul nahi paayi: $e');
-      Navigator.pop(context);
-    }
+  Future<ui.Image> decode(Uint8List b) {
+    final c = Completer<ui.Image>();
+    ui.decodeImageFromList(b, c.complete);
+    return c.future;
   }
 
-  Offset _n(Offset p, double w, double h) =>
-      Offset((p.dx / w).clamp(0.0, 1.0).toDouble(), (p.dy / h).clamp(0.0, 1.0).toDouble());
+  Future<void> load(Uint8List b) async {
+    final im = await decode(b);
+    if (!mounted) return;
+    setState(() {
+      base = im;
+      strokes.clear();
+      texts.clear();
+      cr = full;
+    });
+  }
 
-  // Poora canvas (photo + likha hua + text) ek image me
-  Future<ui.Image> _capture() async {
-    setState(() => exporting = true);
-    await WidgetsBinding.instance.endOfFrame;
-    final b = boundaryKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-    var ratio = imgSize!.width / b.size.width;
-    final longest = math.max(b.size.width, b.size.height) * ratio;
-    if (longest > 2400) ratio *= 2400 / longest;
-    final img = await b.toImage(pixelRatio: ratio);
-    if (mounted) setState(() => exporting = false);
-    return img;
+  Future<ui.Image> bake() {
+    final b = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    final w = b.size.width;
+    var pr = base!.width / w;
+    if (base!.width > 2200) pr = 2200 / w;
+    return b.toImage(pixelRatio: pr);
+  }
+
+  Future<void> cropCore() async {
+    final img = await bake();
+    final src = Rect.fromLTRB(cr.left * img.width, cr.top * img.height,
+        cr.right * img.width, cr.bottom * img.height);
+    final rec = ui.PictureRecorder();
+    Canvas(rec).drawImageRect(img, src, Rect.fromLTWH(0, 0, src.width, src.height),
+        Paint()..filterQuality = FilterQuality.high);
+    final out = await rec.endRecording().toImage(src.width.round(), src.height.round());
+    if (!mounted) return;
+    setState(() {
+      base = out;
+      strokes.clear();
+      texts.clear();
+      cr = full;
+      mode = 1;
+    });
   }
 
   Future<void> applyCrop() async {
-    if (busy || fullCrop) return;
-    busy = true;
-    try {
-      final full = await _capture();
-      final src = Rect.fromLTRB(crop.left * full.width, crop.top * full.height,
-          crop.right * full.width, crop.bottom * full.height);
-      final w = math.max(1, src.width.round());
-      final h = math.max(1, src.height.round());
-      final rec = ui.PictureRecorder();
-      Canvas(rec).drawImageRect(full, src,
-          Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()),
-          Paint()..filterQuality = FilterQuality.high);
-      final out = await rec.endRecording().toImage(w, h);
-      final d = await out.toByteData(format: ui.ImageByteFormat.png);
-      final nb = d!.buffer.asUint8List();
-      final im = await decodeImageFromList(nb);
-      if (!mounted) return;
-      setState(() {
-        bytes = nb;
-        imgSize = Size(im.width.toDouble(), im.height.toDouble());
-        strokes.clear();
-        texts.clear();
-        sel = null;
-        crop = _full;
-      });
-    } catch (e) {
-      if (mounted) toast(context, 'Crop nahi hua: $e');
-    } finally {
-      busy = false;
-    }
+    if (busy) return;
+    setState(() => busy = true);
+    await cropCore();
+    if (mounted) setState(() => busy = false);
   }
 
   Future<void> done() async {
     if (busy) return;
-    if (mode == _EM.crop && !fullCrop) await applyCrop();
-    if (!mounted) return;
-    if (!dirty) {
-      Navigator.pop(context, original);
-      return;
-    }
-    busy = true;
-    showLoading(context);
-    try {
-      final img = await _capture();
-      final d = await img.toByteData(format: ui.ImageByteFormat.png);
-      if (!mounted) return;
-      Navigator.pop(context); // loading
-      Navigator.pop(context, d!.buffer.asUint8List());
-    } catch (e) {
-      if (mounted) {
-        Navigator.pop(context);
-        toast(context, 'Save nahi hua: $e');
-      }
-    } finally {
-      busy = false;
-    }
+    setState(() => busy = true);
+    FocusScope.of(context).unfocus();
+    if (mode == 0 && cr != full) await cropCore();
+    await Future.delayed(const Duration(milliseconds: 80));
+    final im = await bake();
+    final d = await im.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted) Navigator.pop(context, d!.buffer.asUint8List());
   }
 
-  void resetAll() {
-    setState(() {
-      bytes = original;
-      strokes.clear();
-      texts.clear();
-      sel = null;
-      crop = _full;
-    });
-    _load();
+  int hitTest(Offset p) {
+    final w = area.width, h = area.height;
+    final r = Rect.fromLTRB(cr.left * w, cr.top * h, cr.right * w, cr.bottom * h);
+    const t = 32.0;
+    final inY = p.dy > r.top - t && p.dy < r.bottom + t;
+    final inX = p.dx > r.left - t && p.dx < r.right + t;
+    var g = 0;
+    if (inY && (p.dx - r.left).abs() < t) g |= 1;
+    if (inX && (p.dy - r.top).abs() < t) g |= 2;
+    if (inY && (p.dx - r.right).abs() < t) g |= 4;
+    if (inX && (p.dy - r.bottom).abs() < t) g |= 8;
+    if ((g & 1) != 0 && (g & 4) != 0) {
+      g &= (p.dx - r.left).abs() < (p.dx - r.right).abs() ? ~4 : ~1;
+    }
+    if ((g & 2) != 0 && (g & 8) != 0) {
+      g &= (p.dy - r.top).abs() < (p.dy - r.bottom).abs() ? ~8 : ~2;
+    }
+    if (g == 0 && r.contains(p)) g = 16;
+    return g;
   }
 
-  void _dragCrop(Offset d) {
-    const m = .08;
-    double l = crop.left, t = crop.top, r = crop.right, b = crop.bottom;
-    if (_ch == _CH.none) return;
-    if (_ch == _CH.move) {
+  void cropDrag(Offset delta) {
+    final dx = delta.dx / area.width, dy = delta.dy / area.height;
+    const m = .1;
+    var l = cr.left, t = cr.top, r = cr.right, b = cr.bottom;
+    if (grab == 16) {
       final w = r - l, h = b - t;
-      l = (l + d.dx).clamp(0.0, 1 - w).toDouble();
-      t = (t + d.dy).clamp(0.0, 1 - h).toDouble();
+      l = (l + dx).clamp(0.0, 1 - w).toDouble();
+      t = (t + dy).clamp(0.0, 1 - h).toDouble();
       r = l + w;
       b = t + h;
     } else {
-      final mL = const {_CH.tl, _CH.bl, _CH.le}.contains(_ch);
-      final mR = const {_CH.tr, _CH.br, _CH.ri}.contains(_ch);
-      final mT = const {_CH.tl, _CH.tr, _CH.to}.contains(_ch);
-      final mB = const {_CH.bl, _CH.br, _CH.bo}.contains(_ch);
-      if (mL) l = (l + d.dx).clamp(0.0, r - m).toDouble();
-      if (mR) r = (r + d.dx).clamp(l + m, 1.0).toDouble();
-      if (mT) t = (t + d.dy).clamp(0.0, b - m).toDouble();
-      if (mB) b = (b + d.dy).clamp(t + m, 1.0).toDouble();
+      if ((grab & 1) != 0) l = (l + dx).clamp(0.0, r - m).toDouble();
+      if ((grab & 2) != 0) t = (t + dy).clamp(0.0, b - m).toDouble();
+      if ((grab & 4) != 0) r = (r + dx).clamp(l + m, 1.0).toDouble();
+      if ((grab & 8) != 0) b = (b + dy).clamp(t + m, 1.0).toDouble();
     }
-    crop = Rect.fromLTRB(l, t, r, b);
+    setState(() => cr = Rect.fromLTRB(l, t, r, b));
   }
 
-  Widget cropLayer(double w, double h) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onPanStart: (d) {
-          final p = d.localPosition;
-          final r = Rect.fromLTRB(
-              crop.left * w, crop.top * h, crop.right * w, crop.bottom * h);
-          const t = 28.0;
-          bool nx(double x) => (p.dx - x).abs() < t;
-          bool ny(double y) => (p.dy - y).abs() < t;
-          final inX = p.dx > r.left - t && p.dx < r.right + t;
-          final inY = p.dy > r.top - t && p.dy < r.bottom + t;
-          if (nx(r.left) && ny(r.top)) {
-            _ch = _CH.tl;
-          } else if (nx(r.right) && ny(r.top)) {
-            _ch = _CH.tr;
-          } else if (nx(r.left) && ny(r.bottom)) {
-            _ch = _CH.bl;
-          } else if (nx(r.right) && ny(r.bottom)) {
-            _ch = _CH.br;
-          } else if (nx(r.left) && inY) {
-            _ch = _CH.le;
-          } else if (nx(r.right) && inY) {
-            _ch = _CH.ri;
-          } else if (ny(r.top) && inX) {
-            _ch = _CH.to;
-          } else if (ny(r.bottom) && inX) {
-            _ch = _CH.bo;
-          } else if (r.contains(p)) {
-            _ch = _CH.move;
-          } else {
-            _ch = _CH.none;
-          }
-        },
-        onPanUpdate: (d) {
-          if (_ch == _CH.none) return;
-          setState(() => _dragCrop(Offset(d.delta.dx / w, d.delta.dy / h)));
-        },
-        onPanEnd: (_) => _ch = _CH.none,
-        child: CustomPaint(painter: _CropPainter(crop), size: Size.infinite),
-      );
+  Offset frac(Offset p) => Offset(p.dx / area.width, p.dy / area.height);
 
-  Widget drawLayer(double w, double h) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapUp: (d) => setState(
-            () => strokes.add(_Stroke([_n(d.localPosition, w, h)], drawColor, drawW))),
-        onPanStart: (d) => setState(
-            () => strokes.add(_Stroke([_n(d.localPosition, w, h)], drawColor, drawW))),
-        onPanUpdate: (d) {
-          if (strokes.isEmpty) return;
-          setState(() => strokes.last.pts.add(_n(d.localPosition, w, h)));
-        },
-      );
-
-  Future<void> textDialog({_TextItem? t}) async {
-    final c = TextEditingController(text: t?.text ?? '');
-    final r = await showDialog<String>(
+  Future<void> editText([TextItem? t]) async {
+    final ctrl = TextEditingController(text: t?.text ?? '');
+    Color col = t?.color ?? Colors.black;
+    String font = t?.font ?? 'Poppins';
+    double size = t?.size ?? 0.07;
+    final res = await showDialog<String>(
       context: context,
-      builder: (d) => AlertDialog(
-        title: Text(t == null ? 'Text likho' : 'Text badlo'),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          minLines: 1,
-          maxLines: null,
-          decoration: const InputDecoration(hintText: 'Yahan likho...'),
+      builder: (d) => StatefulBuilder(
+        builder: (d, set) => AlertDialog(
+          title: Text(t == null ? 'Text likho' : 'Text badlo'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  maxLines: null,
+                  decoration: const InputDecoration(hintText: 'Yahan likho...')),
+              const SizedBox(height: 12),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                for (final c in kColors)
+                  GestureDetector(
+                    onTap: () => set(() => col = c),
+                    child: Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        color: c,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color: col == c ? kPurple : Colors.black26,
+                            width: col == c ? 3 : 1),
+                      ),
+                    ),
+                  ),
+              ]),
+              const SizedBox(height: 8),
+              Wrap(spacing: 6, children: [
+                for (final f in _TypePageState.fonts)
+                  ChoiceChip(
+                    label: Text(f, style: GoogleFonts.getFont(f)),
+                    selected: font == f,
+                    onSelected: (_) => set(() => font = f),
+                  ),
+              ]),
+              Slider(
+                  min: .03,
+                  max: .2,
+                  value: size,
+                  onChanged: (v) => set(() => size = v)),
+            ]),
+          ),
+          actions: [
+            if (t != null)
+              TextButton(
+                  onPressed: () => Navigator.pop(d, 'del'),
+                  child: const Text('Delete')),
+            TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(d, 'ok'), child: const Text('OK')),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(d, c.text.trim()),
-              child: const Text('OK')),
-        ],
       ),
     );
-    if (r == null || r.isEmpty || !mounted) return;
+    final txt = ctrl.text;
+    ctrl.dispose();
+    if (res == null || !mounted) return;
     setState(() {
-      if (t != null) {
-        t.text = r;
-      } else {
-        final n = _TextItem(r, const Offset(.12, .4), textColor, textSize, textFont);
-        texts.add(n);
-        sel = n;
+      if (res == 'del') {
+        texts.remove(t);
+      } else if (txt.trim().isNotEmpty) {
+        if (t == null) {
+          texts.add(TextItem(txt, col, size, font, const Offset(.5, .5)));
+        } else {
+          t.text = txt;
+          t.color = col;
+          t.font = font;
+          t.size = size;
+        }
       }
     });
   }
 
-  Widget canvasContent(double w, double h) => Stack(fit: StackFit.expand, children: [
-        Image.memory(bytes,
-            fit: BoxFit.fill, gaplessPlayback: true, filterQuality: FilterQuality.high),
-        CustomPaint(painter: _StrokePainter(strokes)),
-        if (mode == _EM.text)
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTap: () => setState(() => sel = null),
-            ),
+  Widget textWidget(TextItem t, double w, double h) => Positioned(
+        left: t.pos.dx * w,
+        top: t.pos.dy * h,
+        child: FractionalTranslation(
+          translation: const Offset(-.5, -.5),
+          child: GestureDetector(
+            onPanUpdate: mode == 2
+                ? (d) => setState(() => t.pos = Offset(
+                    (t.pos.dx + d.delta.dx / w).clamp(0.0, 1.0).toDouble(),
+                    (t.pos.dy + d.delta.dy / h).clamp(0.0, 1.0).toDouble()))
+                : null,
+            onTap: mode == 2 ? () => editText(t) : null,
+            child: Text(t.text,
+                style: GoogleFonts.getFont(t.font, fontSize: t.size * w, color: t.color)),
           ),
-        for (final t in texts)
-          Positioned(
-            left: t.pos.dx * w,
-            top: t.pos.dy * h,
-            child: IgnorePointer(
-              ignoring: mode != _EM.text,
-              child: GestureDetector(
-                onTap: () => setState(() => sel = t),
-                onDoubleTap: () => textDialog(t: t),
-                onPanStart: (_) => setState(() => sel = t),
-                onPanUpdate: (d) => setState(() {
-                  t.pos = Offset(
-                    (t.pos.dx + d.delta.dx / w).clamp(-.1, .95).toDouble(),
-                    (t.pos.dy + d.delta.dy / h).clamp(-.05, .95).toDouble(),
-                  );
-                }),
-                child: Container(
-                  constraints: BoxConstraints(maxWidth: w * .9),
-                  padding: const EdgeInsets.all(4),
-                  decoration: (sel == t && !exporting)
-                      ? BoxDecoration(
-                          border: Border.all(color: kPurple, width: 1.5),
-                          borderRadius: BorderRadius.circular(4))
-                      : null,
-                  child: Text(t.text,
-                      style: GoogleFonts.getFont(t.font,
-                          fontSize: t.size * w, color: t.color)),
-                ),
-              ),
-            ),
-          ),
-      ]);
+        ),
+      );
 
   Widget colorRow(Color cur, ValueChanged<Color> on) => SizedBox(
-        height: 44,
+        height: 40,
         child: ListView(scrollDirection: Axis.horizontal, children: [
-          for (final c in kInk)
+          for (final c in kColors)
             GestureDetector(
-              onTap: () => on(c),
+              onTap: () => setState(() => on(c)),
               child: Container(
-                width: 34,
-                height: 34,
-                margin: const EdgeInsets.only(right: 10, top: 5, bottom: 5),
+                width: 32,
+                height: 32,
+                margin: const EdgeInsets.only(right: 10, top: 4, bottom: 4),
                 decoration: BoxDecoration(
                   color: c,
                   shape: BoxShape.circle,
                   border: Border.all(
-                      color: cur == c ? kPurple : Colors.black26,
-                      width: cur == c ? 3 : 1.5),
+                      color: cur == c ? Colors.white : Colors.white38,
+                      width: cur == c ? 3 : 1),
                 ),
               ),
             ),
         ]),
       );
 
-  Widget modePanel() {
-    switch (mode) {
-      case _EM.crop:
-        return Column(children: [
-          const Text('Kone ya kinare kheench kar kisi bhi size me crop karo',
-              style: TextStyle(color: Colors.black54, fontSize: 12.5)),
-          const SizedBox(height: 8),
-          Row(children: [
-            Expanded(
-              child: OutlinedButton(
-                  onPressed: fullCrop ? null : () => setState(() => crop = _full),
-                  child: const Text('Reset')),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: FilledButton.icon(
-                  onPressed: fullCrop ? null : applyCrop,
-                  icon: const Icon(Icons.crop_rounded),
-                  label: const Text('Crop lagao')),
-            ),
-          ]),
-        ]);
-      case _EM.draw:
-        return Column(children: [
-          colorRow(drawColor, (c) => setState(() => drawColor = c)),
-          Row(children: [
-            const Icon(Icons.brush_rounded, size: 20),
-            Expanded(
-              child: Slider(
-                  min: .004,
-                  max: .04,
-                  value: drawW,
-                  onChanged: (v) => setState(() => drawW = v)),
-            ),
-            IconButton(
-                tooltip: 'Undo',
-                onPressed: strokes.isEmpty
-                    ? null
-                    : () => setState(() => strokes.removeLast()),
-                icon: const Icon(Icons.undo_rounded)),
-            IconButton(
-                tooltip: 'Sab mitao',
-                onPressed:
-                    strokes.isEmpty ? null : () => setState(() => strokes.clear()),
-                icon: const Icon(Icons.delete_sweep_rounded)),
-          ]),
-        ]);
-      case _EM.text:
-        final cur = sel;
-        return Column(children: [
-          Row(children: [
-            Expanded(
-              child: FilledButton.tonalIcon(
-                  onPressed: () => textDialog(),
-                  icon: const Icon(Icons.add_rounded),
-                  label: const Text('Text jodo')),
-            ),
-            if (cur != null) ...[
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                  tooltip: 'Text badlo',
-                  onPressed: () => textDialog(t: cur),
-                  icon: const Icon(Icons.edit_rounded)),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                  tooltip: 'Delete',
-                  onPressed: () => setState(() {
-                        texts.remove(cur);
-                        sel = null;
-                      }),
-                  icon: const Icon(Icons.delete_outline_rounded)),
-            ],
-          ]),
-          colorRow(cur?.color ?? textColor, (c) => setState(() {
-                textColor = c;
-                cur?.color = c;
-              })),
-          Row(children: [
-            const Icon(Icons.format_size_rounded, size: 20),
-            Expanded(
-              child: Slider(
-                  min: .02,
-                  max: .15,
-                  value: cur?.size ?? textSize,
-                  onChanged: (v) => setState(() {
-                        textSize = v;
-                        cur?.size = v;
-                      })),
-            ),
-          ]),
-          SizedBox(
-            height: 42,
-            child: ListView(scrollDirection: Axis.horizontal, children: [
-              for (final f in kFonts)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(f, style: GoogleFonts.getFont(f)),
-                    selected: (cur?.font ?? textFont) == f,
-                    onSelected: (_) => setState(() {
-                      textFont = f;
-                      cur?.font = f;
-                    }),
-                  ),
-                ),
+  Widget modeBtn(int m, IconData i, String l) => Expanded(
+        child: InkWell(
+          onTap: () => setState(() => mode = m),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(children: [
+              Icon(i, color: mode == m ? Colors.white : Colors.white54),
+              Text(l,
+                  style: TextStyle(
+                      fontSize: 12, color: mode == m ? Colors.white : Colors.white54)),
             ]),
           ),
-        ]);
+        ),
+      );
+
+  Widget panel() {
+    if (mode == 0) {
+      return Row(children: [
+        Expanded(
+          child: OutlinedButton(
+              onPressed: () => setState(() => cr = full),
+              child: const Text('Reset crop')),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: FilledButton.icon(
+              onPressed: applyCrop,
+              icon: const Icon(Icons.crop_rounded),
+              label: const Text('Crop karo')),
+        ),
+      ]);
     }
+    if (mode == 1) {
+      return Column(mainAxisSize: MainAxisSize.min, children: [
+        Row(children: [
+          Expanded(child: colorRow(penColor, (c) => penColor = c)),
+          IconButton(
+              color: Colors.white,
+              tooltip: 'Undo',
+              onPressed: strokes.isEmpty ? null : () => setState(strokes.removeLast),
+              icon: const Icon(Icons.undo_rounded)),
+        ]),
+        Row(children: [
+          const Icon(Icons.brush_rounded, color: Colors.white70, size: 18),
+          Expanded(
+              child: Slider(
+                  min: .003,
+                  max: .04,
+                  value: penW,
+                  onChanged: (v) => setState(() => penW = v))),
+        ]),
+      ]);
+    }
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      FilledButton.icon(
+          onPressed: () => editText(),
+          icon: const Icon(Icons.text_fields_rounded),
+          label: const Text('Text jodo')),
+      const SizedBox(height: 6),
+      const Text('Text ko ungli se khiskao. Badalne ya hatane ke liye us par tap karo.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white60, fontSize: 12)),
+    ]);
   }
 
   @override
   Widget build(BuildContext context) {
-    final size = imgSize;
-    if (size == null) {
-      return const Scaffold(
-          backgroundColor: Color(0xFF14121F),
-          body: Center(child: CircularProgressIndicator()));
-    }
-    return PopScope(
-      canPop: !dirty,
-      onPopInvokedWithResult: (didPop, _) async {
-        if (didPop) return;
-        final ok = await showDialog<bool>(
-          context: context,
-          builder: (d) => AlertDialog(
-            title: const Text('Changes hata dein?'),
-            content: const Text('Jo edit kiya hai wo save nahi hoga.'),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(d, false), child: const Text('Nahi')),
-              FilledButton(
-                  onPressed: () => Navigator.pop(d, true),
-                  child: const Text('Haan, hatao')),
-            ],
-          ),
-        );
-        if (ok == true && mounted) Navigator.pop(context);
-      },
-      child: Scaffold(
-        backgroundColor: const Color(0xFF14121F),
-        resizeToAvoidBottomInset: false,
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          foregroundColor: Colors.white,
-          title: Text(widget.title, overflow: TextOverflow.ellipsis),
-          actions: [
-            IconButton(
-                tooltip: 'Sab reset',
-                onPressed: dirty ? resetAll : null,
-                icon: const Icon(Icons.restart_alt_rounded)),
-            TextButton.icon(
-                onPressed: done,
-                icon: const Icon(Icons.check_rounded, color: Colors.white),
-                label: const Text('Done', style: TextStyle(color: Colors.white))),
-          ],
-        ),
-        body: Column(children: [
-          Expanded(
-            child: LayoutBuilder(builder: (_, cs) {
-              final aw = math.max(50.0, cs.maxWidth - 32);
-              final ah = math.max(50.0, cs.maxHeight - 32);
-              final sc = math.min(aw / size.width, ah / size.height);
-              final w = size.width * sc, h = size.height * sc;
-              return Center(
-                child: SizedBox(
-                  width: w,
-                  height: h,
-                  child: Stack(clipBehavior: Clip.none, children: [
-                    RepaintBoundary(key: boundaryKey, child: canvasContent(w, h)),
-                    if (mode == _EM.crop) Positioned.fill(child: cropLayer(w, h)),
-                    if (mode == _EM.draw) Positioned.fill(child: drawLayer(w, h)),
+    final im = base;
+    return Scaffold(
+      backgroundColor: const Color(0xFF14102B),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        foregroundColor: Colors.white,
+        title: const Text('Edit'),
+        actions: [
+          IconButton(
+              tooltip: 'Sab reset',
+              onPressed: () => load(widget.bytes),
+              icon: const Icon(Icons.restart_alt_rounded)),
+          TextButton.icon(
+              onPressed: done,
+              icon: const Icon(Icons.check_rounded),
+              label: const Text('Done')),
+        ],
+      ),
+      body: im == null
+          ? const Center(child: CircularProgressIndicator())
+          : Stack(children: [
+            Column(children: [
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Center(
+                    child: LayoutBuilder(builder: (context, box) {
+                      final ar = im.width / im.height;
+                      var w = box.maxWidth, h = w / ar;
+                      if (h > box.maxHeight) {
+                        h = box.maxHeight;
+                        w = h * ar;
+                      }
+                      area = Size(w, h);
+                      return SizedBox(
+                        width: w,
+                        height: h,
+                        child: Stack(children: [
+                          RepaintBoundary(
+                            key: key,
+                            child: Stack(fit: StackFit.expand, children: [
+                              RawImage(image: im, fit: BoxFit.fill),
+                              CustomPaint(painter: StrokePainter(strokes)),
+                              for (final t in texts) textWidget(t, w, h),
+                            ]),
+                          ),
+                          if (mode == 1)
+                            Positioned.fill(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onPanStart: (d) => setState(() => strokes.add(
+                                    Stroke(penColor, penW)..pts.add(frac(d.localPosition)))),
+                                onPanUpdate: (d) => setState(
+                                    () => strokes.last.pts.add(frac(d.localPosition))),
+                              ),
+                            ),
+                          if (mode == 0)
+                            Positioned.fill(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onPanStart: (d) => grab = hitTest(d.localPosition),
+                                onPanUpdate: (d) => cropDrag(d.delta),
+                                child: CustomPaint(painter: CropPainter(cr)),
+                              ),
+                            ),
+                        ]),
+                      );
+                    }),
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                color: const Color(0xFF1E1840),
+                child: SafeArea(
+                  top: false,
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Row(children: [
+                      modeBtn(0, Icons.crop_rounded, 'Crop'),
+                      modeBtn(1, Icons.brush_rounded, 'Likho / Draw'),
+                      modeBtn(2, Icons.text_fields_rounded, 'Text'),
+                    ]),
+                    panel(),
                   ]),
                 ),
-              );
-            }),
-          ),
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: SafeArea(
-              top: false,
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                SegmentedButton<_EM>(
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(
-                        value: _EM.crop,
-                        icon: Icon(Icons.crop_rounded),
-                        label: Text('Crop')),
-                    ButtonSegment(
-                        value: _EM.draw,
-                        icon: Icon(Icons.brush_rounded),
-                        label: Text('Draw')),
-                    ButtonSegment(
-                        value: _EM.text,
-                        icon: Icon(Icons.text_fields_rounded),
-                        label: Text('Text')),
-                  ],
-                  selected: {mode},
-                  onSelectionChanged: (s) async {
-                    if (mode == _EM.crop && !fullCrop) await applyCrop();
-                    if (!mounted) return;
-                    setState(() {
-                      mode = s.first;
-                      sel = null;
-                    });
-                  },
-                ),
-                const SizedBox(height: 8),
-                modePanel(),
-              ]),
-            ),
-          ),
-        ]),
-      ),
+              ),
+            ]),
+            if (busy)
+              const Positioned.fill(
+                  child: ColoredBox(
+                      color: Colors.black54,
+                      child: Center(child: CircularProgressIndicator()))),
+          ]),
     );
   }
 }
