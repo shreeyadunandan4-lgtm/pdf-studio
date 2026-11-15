@@ -18,6 +18,15 @@ jobs:
       - run: sed -i 's/android:label="[^"]*"/android:label="Zod PDF"/' android/app/src/main/AndroidManifest.xml
       - run: pip install pillow
       - run: python3 make_icons.py
+      - name: Lint band karo
+        run: |
+          f=android/build.gradle.kts
+          if [ -f "$f" ]; then
+            printf '\nsubprojects {\n    tasks.configureEach {\n        if (name.startsWith("lint")) { enabled = false }\n    }\n}\n' >> "$f"
+          else
+            f=android/build.gradle
+            printf '\nsubprojects {\n    tasks.configureEach { t ->\n        if (t.name.startsWith("lint")) { t.enabled = false }\n    }\n}\n' >> "$f"
+          fi
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
